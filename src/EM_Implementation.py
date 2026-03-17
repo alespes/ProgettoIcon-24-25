@@ -1,7 +1,6 @@
 import os
-
-import pandas as pd
 import numpy as np
+import pandas as pd
 import seaborn as sns
 from matplotlib import pyplot as plt
 from scipy.stats import zscore
@@ -9,95 +8,74 @@ from sklearn.decomposition import PCA
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
+from src.ResultsExporter import (
+    save_gmm_certainty_plot, save_clustering_analysis
+)
+
 
 class EM_Implementation:
+
+    N_COMPONENTS = 3
+
     def __init__(self, data: pd.DataFrame):
-        self.data = data
+        self.data          = data
         self.featured_data = None
+        self._cluster_labels: np.ndarray | None = None
 
-    def call(self):
-        # Selecting relevant features for clustering
-        self.featured_data = self.data[
-            ['neighbourhood group', 'host_identity_verified', 'room type',
-             # 'price',
-             'minimum nights',
-             'instant_bookable',
-             'cancellation_policy', 'availability 365', 'reviews per month']]
+    def call(self) -> np.ndarray:
+        self.featured_data = self.data[[
+            'neighbourhood group', 'host_identity_verified', 'room type',
+            'minimum nights', 'instant_bookable',
+            'cancellation_policy', 'availability 365', 'reviews per month'
+        ]].dropna().reset_index(drop=True)
 
-        # Checking for missing values and handling them (if necessary)
-        self.featured_data = self.featured_data.dropna()  # Simple approach; could use imputation if needed
+        scaler       = StandardScaler()
+        scaled_nums  = scaler.fit_transform(
+            self.featured_data.select_dtypes(include=['float64', 'int64'])
+        )
+        encoder      = OneHotEncoder(sparse_output=False)
+        encoded_cats = encoder.fit_transform(
+            self.featured_data.select_dtypes(include='object')
+        )
+        X_prepared = np.hstack((scaled_nums, encoded_cats))
 
-        # Define categorical and numerical features
-        categorical_features = ['room type', 'instant_bookable', 'cancellation_policy', 'neighbourhood group',
-                                'host_identity_verified']
-        numerical_features = [# 'price',
-                              'minimum nights', 'availability 365', 'reviews per month']
-
-        scaler = StandardScaler()
-        scaled_numerics = scaler.fit_transform(self.featured_data.select_dtypes(include=['float64', 'int']))
-
-        encoder = OneHotEncoder(sparse_output=False)
-        encoded_cats = encoder.fit_transform(self.featured_data.select_dtypes(include=['object']))
-
-        # Combine scaled numerical and encoded categorical features
-        X_prepared = np.hstack((scaled_numerics, encoded_cats))
-
-        # Define the GMM model with a chosen number of components
-        num_components = 3  # You can tune this based on your needs
-        gmm = GaussianMixture(n_components=num_components, covariance_type='full', random_state=42)
-
-        # Fit the GMM model on the preprocessed data
+        gmm = GaussianMixture(
+            n_components=self.N_COMPONENTS,
+            covariance_type='full', random_state=42
+        )
         gmm.fit(X_prepared)
 
-        # Predict the cluster probabilities for each data point
-        cluster_probs = gmm.predict_proba(X_prepared)
-        cluster_labels = gmm.predict(X_prepared)  # Hard assignments based on maximum probability
+        cluster_probs  = gmm.predict_proba(X_prepared)
+        cluster_labels = gmm.predict(X_prepared)
 
-        # Calculate BIC and AIC to evaluate the model
-        bic = gmm.bic(X_prepared)
-        aic = gmm.aic(X_prepared)
-        print("BIC:", bic)
-        print("AIC:", aic)
+        print(f"[GMM] BIC: {gmm.bic(X_prepared):.2f}  |  AIC: {gmm.aic(X_prepared):.2f}")
 
         self.featured_data['cluster'] = cluster_labels
 
-        # Cluster analysis (mean for numerical and mode for categorical features)
-        numerical_features = self.featured_data.select_dtypes(include=['number']).columns
-        categorical_features = self.featured_data.select_dtypes(include=['object']).columns
-
-        numeric_means = self.featured_data.groupby('cluster')[numerical_features].mean()
-        categorical_modes = self.featured_data.groupby('cluster')[categorical_features].agg(
+        # Analisi cluster
+        num_cols  = self.featured_data.select_dtypes(include='number').columns
+        cat_cols  = self.featured_data.select_dtypes(include='object').columns
+        num_means = self.featured_data.groupby('cluster')[num_cols].mean()
+        cat_modes = self.featured_data.groupby('cluster')[cat_cols].agg(
             lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan
         )
+        cluster_analysis = pd.concat([num_means, cat_modes], axis=1)
+        print("\n[GMM] Analisi dei cluster:")
+        print(cluster_analysis.to_string())
 
-        # Combine analysis results
-        cluster_analysis = pd.concat([numeric_means, categorical_modes], axis=1)
-        print("Cluster analysis with GMM:")
-        print(cluster_analysis)
-        cluster_analysis.to_csv(os.path.join('data', 'Soft_clustering_analysis.csv'), index=False)
+        # ── Salvataggio CSV ───────────────────────────────────────────────
+        save_clustering_analysis(cluster_analysis, kind="gmm")
 
-        # Apply PCA for dimensionality reduction (2 or 3 components for visualization)
-        pca = PCA(n_components=2)
-        X_pca = pca.fit_transform(X_prepared)
-        # Calculate z-scores across PCA components
+        # ── PCA 2D + salvataggio grafico ──────────────────────────────────
+        pca      = PCA(n_components=2)
+        X_pca    = pca.fit_transform(X_prepared)
         z_scores = np.abs(zscore(X_pca))
-        # Define a z-score threshold (e.g., 3 standard deviations) and filter
-        z_threshold = 3
-        non_outliers = (z_scores < z_threshold).all(axis=1)
+        non_out  = (z_scores < 3).all(axis=1)
 
-        # Calculate certainty for each point as the max probability of belonging to any cluster
-        certainty = cluster_probs.max(axis=1)
-        # Filter out outliers in both X_prepared and cluster assignments
-        X_prepared_filtered = X_prepared[non_outliers]
-        cluster_labels_filtered = cluster_labels[non_outliers]
-        certainty_filtered = certainty[non_outliers]
+        certainty          = cluster_probs.max(axis=1)
+        certainty_filtered = certainty[non_out]
 
-        # Scatter plot with certainty as a color scale (after outlier removal)
-        plt.figure(figsize=(10, 7))
-        sns.scatterplot(x=X_pca[non_outliers][:, 0], y=X_pca[non_outliers][:, 1],
-                        hue=certainty_filtered, palette="coolwarm", s=50) # legend="full"
-        plt.title("GMM Clustering with Certainty Levels")
-        plt.xlabel("PCA Component 1")
-        plt.ylabel("PCA Component 2")
-        plt.legend(title='Cluster')
-        plt.show()
+        save_gmm_certainty_plot(X_pca[non_out], certainty_filtered)
+
+        self._cluster_labels = cluster_labels
+        return self._cluster_labels
