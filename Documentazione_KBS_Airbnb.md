@@ -3,7 +3,7 @@
 **Corso:** Ingegneria della Conoscenza — AA 25/26  
 **Autore:** Alessandro Pesari — Matricola 779406  
 **Docente:** Prof. Nicola Fanizzi  
-**Repository:** [GitHub](https://github.com)
+**Repository:** [GitHub](https://github.com/alespes/ProgettoIcon-2026/tree/main)
 
 ---
 
